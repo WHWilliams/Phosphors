@@ -1,0 +1,155 @@
+﻿// Declare kernels
+#pragma kernel KMain
+#pragma kernel KSpawn
+#pragma kernel KInit
+#pragma kernel KInstantiate
+#pragma kernel KPhosphorFeed
+#pragma kernel KReturn
+#pragma kernel KGetScore
+
+// Thread group size
+#define BLOCK_SIZE 64
+
+#define BASE_HAUL 10
+
+// uniform float speed;
+uniform int agentsToSpawn;
+uniform int maxAgents;
+uniform int maxPhosphors;
+uniform float maxSpeed;
+uniform float maxAccel;
+uniform float phosphorRadius;
+uniform float scale;
+
+uniform int points;
+
+float phosphorX;
+float phosphorY;
+
+struct agentData
+{
+	float2 pos;
+	float2 vel;	
+	float life;
+	int targetIndex;
+	int playerID;
+};
+
+StructuredBuffer<float4> targetsBuffer;
+StructuredBuffer<agentData> agentBufferIn;
+RWStructuredBuffer<agentData> agentBufferOut;
+AppendStructuredBuffer<int> appendFreeBuffer;
+ConsumeStructuredBuffer<int> consumeFreeBuffer;
+StructuredBuffer<agentData> spawnBuffer;
+AppendStructuredBuffer<int> triAppendBuffer;
+AppendStructuredBuffer<int> returnBuffer;
+
+
+
+[numthreads(BLOCK_SIZE,1,1)]
+void KReturn(uint id: SV_DispatchThreadID)
+{
+	int i = id.x;
+	if(agentBufferIn[i].life > 0.0f && length(agentBufferIn[i].pos) < phosphorRadius && agentBufferIn[i].playerID > 0)
+	{
+		returnBuffer.Append(agentBufferIn[i].playerID);
+		appendFreeBuffer.Append(i);
+		agentBufferOut[i].life = 0.0f;
+	}
+}
+
+[numthreads(BLOCK_SIZE,1,1)]
+void KPhosphorFeed(uint id: SV_DispatchThreadID)
+{
+	int i = id.x;
+	if(agentBufferIn[i].life > 0.0f && (distance(agentBufferIn[i].pos,float2(phosphorX,phosphorY)) < phosphorRadius) && agentBufferIn[i].playerID <= 0)
+	{
+		agentBufferOut[i].targetIndex = maxPhosphors;
+		agentBufferOut[i].playerID = -agentBufferOut[i].playerID;
+		// subtract energy from current phosphor
+	}
+}
+
+[numthreads(BLOCK_SIZE,1,1)]
+void KInstantiate(uint id: SV_DispatchThreadID)
+{
+	int i = id.x;
+	if(agentBufferIn[i].life > 0.0f)
+		triAppendBuffer.Append(i);
+}
+
+
+[numthreads(BLOCK_SIZE,1,1)]
+void KInit(uint3 id : SV_DispatchThreadID)
+{
+	int i = id.x;
+	appendFreeBuffer.Append(i);
+	agentBufferOut[i].life = 0.0f;
+}
+
+
+[numthreads(BLOCK_SIZE,1,1)]
+void KMain ( uint3 id: SV_DispatchThreadID)
+{	
+	///
+	// The dead don't sim
+	int i = id.x;	
+	if(agentBufferIn[i].life <= 0.0f)
+	{
+		agentBufferOut[i].life = 0.0f;
+		return;
+	}
+	
+	///
+	// Copy unincrementing values
+	agentBufferOut[i].targetIndex = agentBufferIn[i].targetIndex;
+	agentBufferOut[i].playerID = agentBufferIn[i].playerID;
+
+	///
+	// Calculate lost life and handle death
+	float lifeLoss = 1.0f;
+	agentBufferOut[i].life = agentBufferIn[i].life - lifeLoss;
+	// if dead append to free buffer
+	if(agentBufferOut[i].life <= 0.0f)
+	{
+		appendFreeBuffer.Append(i);
+	}
+
+	///
+	// Accumulate forces	
+	float2 accumulation = float2(0.0f,0.0f);
+
+	// Pursuit Force	
+	float2 desired;	
+	float4 targetInfo = targetsBuffer[agentBufferIn[i].targetIndex];
+	desired = normalize(targetInfo.xy+targetInfo.zw - agentBufferIn[i].pos);
+	desired *= maxAccel;	
+	accumulation += (desired - agentBufferIn[i].vel);	
+	
+	
+	// Apply forces
+	agentBufferOut[i].vel = agentBufferIn[i].vel + accumulation;
+
+		
+
+	// Integrate Vel
+	agentBufferOut[i].pos = agentBufferIn[i].pos + agentBufferOut[i].vel;	
+}	
+	
+
+[numthreads(BLOCK_SIZE,1,1)]
+void KSpawn(uint id : SV_DispatchThreadID)
+{
+	// get next free agent index
+	int i = id.x;
+	if(i >= agentsToSpawn) return;
+	int agentIndex = consumeFreeBuffer.Consume();
+
+	// init agent data from spawn buffer
+	agentBufferOut[agentIndex].pos = spawnBuffer[i].pos;
+	agentBufferOut[agentIndex].life = spawnBuffer[i].life;
+	agentBufferOut[agentIndex].vel = spawnBuffer[i].vel;
+	agentBufferOut[agentIndex].targetIndex = spawnBuffer[i].targetIndex;
+	agentBufferOut[agentIndex].playerID = spawnBuffer[i].playerID;
+}
+
